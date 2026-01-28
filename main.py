@@ -9,6 +9,7 @@ import dns.resolver
 try:
     import pyrogram
     import pytz 
+    from aiohttp import web # REQUIRED FOR KOYEB FREE TIER
     from pyrogram import Client, filters, enums, idle
     from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
     from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, PeerIdInvalid
@@ -17,7 +18,7 @@ try:
     from dotenv import load_dotenv
 except ImportError:
     print("📦 Installing requirements...")
-    os.system("pip install -U pyrogram tgcrypto motor dnspython python-dotenv pytz apscheduler")
+    os.system("pip install -U pyrogram tgcrypto motor dnspython python-dotenv pytz apscheduler aiohttp")
     print("✅ Done! Restarting...")
     os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -38,22 +39,32 @@ def get_bool(key, default="False"):
 
 # Load Variables
 try:
-    API_ID = int(os.getenv("API_ID"))
-    API_HASH = os.getenv("API_HASH")
-    BOT_TOKENS = os.getenv("BOT_TOKEN").split(",")
-    MONGO_URL = os.getenv("MONGO_URL")
-    LOG_CHANNEL = int(os.getenv("LOG_CHANNEL_ID"))
-    ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x]
+    API_ID = int(os.getenv("API_ID", "0")) # Default to 0 to prevent crash before validation
+    API_HASH = os.getenv("API_HASH", "")
+    BOT_TOKENS = os.getenv("BOT_TOKEN", "").split(",")
+    MONGO_URL = os.getenv("MONGO_URL", "")
+    LOG_CHANNEL = int(os.getenv("LOG_CHANNEL_ID", "0"))
     
-    # --- NEW PIN CONFIGURATIONS ---
+    # Validation
+    if API_ID == 0 or not API_HASH or not BOT_TOKENS or not MONGO_URL:
+        # If running on cloud, variables might not be loaded yet, skip exit
+        if not os.getenv("KOYEB_APP_NAME"): 
+            print("❌ ERROR: Missing Env Variables!")
+            # exit() # Commented out to allow web server to start if needed for debugging
+
+    # ADMIN IDS
+    _admin_ids = os.getenv("ADMIN_IDS", "")
+    ADMIN_IDS = [int(x) for x in _admin_ids.split(",") if x]
+    
+    # PIN CONFIGURATIONS
     PIN_START = get_bool("PIN_START_RAW", "False")
     PIN_ADS   = get_bool("PIN_ADS_RAW", "False")
     PIN_ALERT = get_bool("PIN_ALERT_RAW", "False")
     PIN_BL    = get_bool("PIN_BL_RAW", "False")
+    ADS_RAW_PIN = get_bool("ADS_RAW_PIN", "False")
 
-except (TypeError, AttributeError, ValueError):
-    print("\n❌ ERROR: Could not read .env file!")
-    exit()
+except (TypeError, AttributeError, ValueError) as e:
+    print(f"\n❌ Configuration Error: {e}")
 
 # Setup Logging
 logging.basicConfig(level=logging.ERROR)
@@ -124,7 +135,10 @@ class Database:
         return stats
 
 try:
-    db = Database(MONGO_URL)
+    if MONGO_URL:
+        db = Database(MONGO_URL)
+    else:
+        db = None
 except Exception as e:
     print(f"❌ MongoDB Error: {e}")
     exit()
@@ -132,10 +146,11 @@ except Exception as e:
 # --- 4. CLIENT INIT ---
 
 apps = []
-for i, token in enumerate(BOT_TOKENS):
-    if not token.strip(): continue
-    app = Client(name=f"bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=token.strip())
-    apps.append(app)
+if BOT_TOKENS:
+    for i, token in enumerate(BOT_TOKENS):
+        if not token.strip(): continue
+        app = Client(name=f"bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=token.strip())
+        apps.append(app)
 
 # --- 5. TEXT TEMPLATES ---
 
@@ -205,7 +220,7 @@ async def handle_sequence(client, chat_id, reqst_msg_id):
             reply_markup=button, 
             parse_mode=enums.ParseMode.MARKDOWN
         )
-        # Always pin DELETE_RAW (as per existing logic)
+        # Always pin DELETE_RAW
         try:
             await del_msg.pin(disable_notification=False, both_sides=True)
         except Exception as e:
@@ -217,12 +232,9 @@ async def handle_sequence(client, chat_id, reqst_msg_id):
     try:
         # SEND BL TEXT
         bl_msg = await client.send_message(chat_id, make_bold(BL_RAW), parse_mode=enums.ParseMode.MARKDOWN)
-        # PIN BL TEXT IF ENABLED
         if PIN_BL:
-            try:
-                await bl_msg.pin(disable_notification=False, both_sides=True)
-            except Exception as e:
-                print(f"⚠️ Failed to pin BL_RAW: {e}")
+            try: await bl_msg.pin(disable_notification=False, both_sides=True)
+            except Exception as e: print(f"⚠️ Failed to pin BL_RAW: {e}")
     except:
         pass
 
@@ -235,7 +247,7 @@ def register_handlers(app: Client):
     async def start_handler(client: Client, message: Message):
         user_id = message.from_user.id
         
-        if await db.is_banned(user_id): return 
+        if db and await db.is_banned(user_id): return 
 
         source = "organic"
         if len(message.command) > 1:
@@ -246,7 +258,9 @@ def register_handlers(app: Client):
         full_name = f"{fname} {lname}".strip()
         custom_mention = f"[{full_name}](tg://user?id={user_id})"
 
-        is_new = await db.add_user(user_id, message.from_user.first_name, message.from_user.username, source)
+        is_new = False
+        if db:
+            is_new = await db.add_user(user_id, message.from_user.first_name, message.from_user.username, source)
 
         if is_new and source != "return":
             log_text = (
@@ -269,7 +283,7 @@ def register_handlers(app: Client):
 
             # SEND ADS RAW
             ads_msg = await message.reply_text(make_bold(ADS_RAW), parse_mode=enums.ParseMode.MARKDOWN)
-            if PIN_ADS:
+            if PIN_ADS or ADS_RAW_PIN:
                 try: await ads_msg.pin(disable_notification=False, both_sides=True)
                 except Exception as e: print(f"⚠️ Failed to pin ADS_RAW: {e}")
 
@@ -279,6 +293,7 @@ def register_handlers(app: Client):
     # --- ADMIN: STATS ---
     @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
     async def stats_handler(client: Client, message: Message):
+        if not db: return
         total, active, blocked, today = await db.get_full_stats()
         sources = await db.get_source_stats()
         
@@ -353,7 +368,7 @@ def register_handlers(app: Client):
     # --- MAIN REPLY FLOW ---
     @app.on_message(filters.private & ~filters.command(["start", "broadcast", "stats", "ban", "unban"]))
     async def reply_flow(client: Client, message: Message):
-        if await db.is_banned(message.from_user.id): return
+        if db and await db.is_banned(message.from_user.id): return
 
         try:
             req_buttons = InlineKeyboardMarkup([
@@ -387,7 +402,7 @@ for app in apps:
 # --- 8. DAILY REPORT SCHEDULER (5:30 AM IST) ---
 
 async def send_daily_report():
-    if not apps: return
+    if not apps or not db: return
     try:
         total, active, blocked, today = await db.get_full_stats()
         sources = await db.get_source_stats()
@@ -408,10 +423,29 @@ async def send_daily_report():
 scheduler = AsyncIOScheduler()
 scheduler.add_job(send_daily_report, 'cron', hour=5, minute=30, timezone=IST)
 
-# --- 9. RUN ---
+# --- 9. DUMMY WEB SERVER FOR KOYEB FREE TIER ---
+
+async def web_handler(request):
+    return web.Response(text="Bot is Running")
+
+async def start_web_server():
+    port = int(os.environ.get("PORT", 8000))
+    app = web.Application()
+    app.add_routes([web.get('/', web_handler)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌍 Web Server running on port {port}")
+
+# --- 10. RUN ---
 
 async def main():
     print(f"🚀 Starting {len(apps)} Bots...")
+    
+    # Start Web Server First (Important for Health Checks)
+    await start_web_server()
+    
     scheduler.start()
     await asyncio.gather(*[app.start() for app in apps])
     print("✅ Bots are Online!")
