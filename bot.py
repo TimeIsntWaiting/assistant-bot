@@ -1,77 +1,52 @@
 import os
-import sys
 import logging
 import asyncio
 import datetime
 import dns.resolver
+import pytz 
+from telebot.async_telebot import AsyncTeleBot
+from telebot import types
+from motor.motor_asyncio import AsyncIOMotorClient
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dotenv import load_dotenv
 
-# --- 1. AUTO-UPDATE & DEPENDENCIES ---
-try:
-    import pyrogram
-    import pytz 
-    from aiohttp import web # REQUIRED FOR KOYEB FREE TIER
-    from pyrogram import Client, filters, enums, idle
-    from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-    from pyrogram.errors import FloodWait, InputUserDeactivated, UserIsBlocked, PeerIdInvalid
-    from motor.motor_asyncio import AsyncIOMotorClient
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from dotenv import load_dotenv
-except ImportError:
-    print("📦 Installing requirements...")
-    os.system("pip install -U pyrogram tgcrypto motor dnspython python-dotenv pytz apscheduler aiohttp")
-    print("✅ Done! Restarting...")
-    os.execv(sys.executable, [sys.executable] + sys.argv)
-
-# --- 2. CONFIGURATION ---
+# --- 1. CONFIGURATION ---
 
 # Fix Google DNS
-dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
-dns.resolver.default_resolver.nameservers = ['8.8.8.8']
+try:
+    dns.resolver.default_resolver = dns.resolver.Resolver(configure=False)
+    dns.resolver.default_resolver.nameservers = ['8.8.8.8']
+except Exception:
+    pass
 
-# FORCE LOAD .env
-script_dir = os.path.dirname(os.path.abspath(__file__))
-env_path = os.path.join(script_dir, ".env")
-load_dotenv(env_path)
+load_dotenv()
 
-# Helper to load boolean env vars
 def get_bool(key, default="False"):
     return os.getenv(key, default).lower() in ["true", "1", "yes", "on"]
 
-# Load Variables
+# Load Env Variables
 try:
-    API_ID = int(os.getenv("API_ID", "0")) # Default to 0 to prevent crash before validation
-    API_HASH = os.getenv("API_HASH", "")
     BOT_TOKENS = os.getenv("BOT_TOKEN", "").split(",")
     MONGO_URL = os.getenv("MONGO_URL", "")
     LOG_CHANNEL = int(os.getenv("LOG_CHANNEL_ID", "0"))
     
-    # Validation
-    if API_ID == 0 or not API_HASH or not BOT_TOKENS or not MONGO_URL:
-        # If running on cloud, variables might not be loaded yet, skip exit
-        if not os.getenv("KOYEB_APP_NAME"): 
-            print("❌ ERROR: Missing Env Variables!")
-            # exit() # Commented out to allow web server to start if needed for debugging
-
-    # ADMIN IDS
-    _admin_ids = os.getenv("ADMIN_IDS", "")
-    ADMIN_IDS = [int(x) for x in _admin_ids.split(",") if x]
-    
-    # PIN CONFIGURATIONS
     PIN_START = get_bool("PIN_START_RAW", "False")
     PIN_ADS   = get_bool("PIN_ADS_RAW", "False")
     PIN_ALERT = get_bool("PIN_ALERT_RAW", "False")
     PIN_BL    = get_bool("PIN_BL_RAW", "False")
     ADS_RAW_PIN = get_bool("ADS_RAW_PIN", "False")
 
-except (TypeError, AttributeError, ValueError) as e:
-    print(f"\n❌ Configuration Error: {e}")
+    _admin_ids = os.getenv("ADMIN_IDS", "")
+    ADMIN_IDS = [int(x) for x in _admin_ids.split(",") if x]
 
-# Setup Logging
-logging.basicConfig(level=logging.ERROR)
+except (ValueError, TypeError):
+    print("⚠️ WARNING: Check your Environment Variables.")
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 IST = pytz.timezone('Asia/Kolkata')
 
-# --- 3. DATABASE ---
+# --- 2. DATABASE ---
 
 class Database:
     def __init__(self, uri):
@@ -134,129 +109,119 @@ class Database:
             stats[doc['_id']] = doc['count']
         return stats
 
-try:
-    if MONGO_URL:
+db = None
+if MONGO_URL:
+    try:
         db = Database(MONGO_URL)
-    else:
-        db = None
-except Exception as e:
-    print(f"❌ MongoDB Error: {e}")
-    exit()
+        print("✅ MongoDB Connected")
+    except Exception as e:
+        print(f"❌ MongoDB Error: {e}")
 
-# --- 4. CLIENT INIT ---
+# --- 3. BOT INIT ---
 
-apps = []
+bots = []
 if BOT_TOKENS:
-    for i, token in enumerate(BOT_TOKENS):
+    for token in BOT_TOKENS:
         if not token.strip(): continue
-        app = Client(name=f"bot_{i}", api_id=API_ID, api_hash=API_HASH, bot_token=token.strip())
-        apps.append(app)
+        bot = AsyncTeleBot(token.strip(), parse_mode='HTML')
+        bots.append(bot)
 
-# --- 5. TEXT TEMPLATES ---
+# --- 4. HTML TEMPLATES ---
 
-def make_bold(text, **kwargs):
-    formatted = text.format(**kwargs)
-    return f"**{formatted}**"
+PREVIEW_IMAGE = "https://telegra.ph/file/p5a5a5a5a5a5a.jpg" 
 
-START_RAW = """
-![⭐](tg://emoji?id=6321173922398084063) Hey {name} Welcome to ![🍿](tg://emoji?id=6323306309236038626) Bot ![🤖](tg://emoji?id=6321320290588565035)
+START_HTML = """
+<a href="{img}">&#8203;</a><tg-emoji emoji-id="6321173922398084063">⭐</tg-emoji> Hey {name} Welcome to <tg-emoji emoji-id="6323306309236038626">🍿</tg-emoji> Bot <tg-emoji emoji-id="6321320290588565035">🤖</tg-emoji>
 
-![❗️](tg://emoji?id=6321325964240362008) ᴘᴏᴡᴇʀғᴜʟ ᴀᴜᴛᴏ-ғɪʟᴛᴇʀ ʙᴏᴛ ![🗣️](tg://emoji?id=6321119462212770863)
+<tg-emoji emoji-id="6321325964240362008">❗️</tg-emoji> <b>ᴘᴏᴡᴇʀғᴜʟ ᴀᴜᴛᴏ-ғɪʟᴛᴇʀ ʙᴏᴛ</b> <tg-emoji emoji-id="6321119462212770863">🗣️</tg-emoji>
 
-![❗️](tg://emoji?id=6321325964240362008) ɪ ᴄᴀɴ ᴘʀᴏᴠɪᴅᴇ ᴀʟʟ ᴍᴏᴠɪᴇs ᴀɴᴅ ᴡᴇʙ sᴇʀɪᴇs![🎬](tg://emoji?id=5375464961822695044)
+<tg-emoji emoji-id="6321325964240362008">❗️</tg-emoji> <b>ɪ ᴄᴀɴ ᴘʀᴏᴠɪᴅᴇ ᴀʟʟ ᴍᴏᴠɪᴇs ᴀɴᴅ ᴡᴇʙ sᴇʀɪᴇs</b><tg-emoji emoji-id="5375464961822695044">🎬</tg-emoji>
 
-![🔎](tg://emoji?id=5258396243666681152) ᴊᴜsᴛ sᴇɴᴅ ᴛʜᴇ ɢᴏᴏɢʟᴇ sᴘᴇʟʟɪɴɢ![🔍](tg://emoji?id=5454370584861384827)
+<tg-emoji emoji-id="5258396243666681152">🔎</tg-emoji> <b>ᴊᴜsᴛ sᴇɴᴅ ᴛʜᴇ ɢᴏᴏɢʟᴇ sᴘᴇʟʟɪɴɢ!</b><tg-emoji emoji-id="5454370584861384827">🔍</tg-emoji>
 
-![ℹ️](tg://emoji?id=6321228227964574392) ᴊᴏ ʙʜɪ ᴍᴏᴠɪᴇ/ᴡᴇʙsᴇʀɪᴇs ᴅᴇᴋʜɴᴀ ʜᴏ ᴇɴɢʟɪsʜ ᴍᴇɴ ᴜsᴋᴀ ɴᴀᴀᴍ ʙʜᴇᴊᴇ.![✍️](tg://emoji?id=6323223570986048376)![🍿](tg://emoji?id=6323224799346695416)
+<tg-emoji emoji-id="6321228227964574392">ℹ️</tg-emoji> <b>ᴊᴏ ʙʜɪ ᴍᴏᴠɪᴇ/ᴡᴇʙsᴇʀɪᴇs ᴅᴇᴋʜɴᴀ ʜᴏ ᴇɴɢʟɪsʜ ᴍᴇɴ ᴜsᴋᴀ ɴᴀᴀᴍ ʙʜᴇᴊᴇ.</b><tg-emoji emoji-id="6323223570986048376">✍️</tg-emoji><tg-emoji emoji-id="6323224799346695416">🍿</tg-emoji>
 
-![🟩](tg://emoji?id=6323322084650916948)![🟩](tg://emoji?id=6323498813965213364)![🟩](tg://emoji?id=6320925046223150523)![🟩](tg://emoji?id=6320951799574436533)![🟩](tg://emoji?id=6323445633680154253)![🟩](tg://emoji?id=6321303986892708556)![🟩](tg://emoji?id=6323535943957487433)![🟩](tg://emoji?id=6323113439434644381)
+<tg-emoji emoji-id="6323322084650916948">🟩</tg-emoji><tg-emoji emoji-id="6323498813965213364">🟩</tg-emoji><tg-emoji emoji-id="6320925046223150523">🟩</tg-emoji><tg-emoji emoji-id="6320951799574436533">🟩</tg-emoji><tg-emoji emoji-id="6323445633680154253">🟩</tg-emoji><tg-emoji emoji-id="6321303986892708556">🟩</tg-emoji><tg-emoji emoji-id="6323535943957487433">🟩</tg-emoji><tg-emoji emoji-id="6323113439434644381">🟩</tg-emoji>
 """
 
-ADS_RAW = """
-![☄️](tg://emoji?id=6320901479737597120) Bot नाम के नीचे अगर विज्ञापन (ads) दिखे तो उस पर 3- 4 बार क्लिक कर दे, ![⚠️](tg://emoji?id=6320837317221162843)
+ADS_HTML = """
+<tg-emoji emoji-id="6320901479737597120">☄️</tg-emoji> <b>Bot नाम के नीचे अगर विज्ञापन (ads) दिखे तो उस पर 3- 4 बार क्लिक कर दे,</b> <tg-emoji emoji-id="6320837317221162843">⚠️</tg-emoji>
 
-![☄️](tg://emoji?id=6320901479737597120)Click 4-5 times on (Ads) below bot name to cancel it ![⚠️](tg://emoji?id=6320837317221162843)
+<tg-emoji emoji-id="6320901479737597120">☄️</tg-emoji><b>Click 4-5 times on (Ads) below bot name to cancel it</b> <tg-emoji emoji-id="6320837317221162843">⚠️</tg-emoji>
 """
 
-REQST_RAW = """
-![🙂](tg://emoji?id=6321056944668810750) This Bot doesn't have permission to complete your request![🙌](tg://emoji?id=6321186412162981920)![🙏](tg://emoji?id=6321289040406519344)
+REQST_HTML = """
+<tg-emoji emoji-id="6321056944668810750">🙂</tg-emoji> <b>This Bot doesn't have permission to complete your request</b><tg-emoji emoji-id="6321186412162981920">🙌</tg-emoji><tg-emoji emoji-id="6321289040406519344">🙏</tg-emoji>
 
-![🟢](tg://emoji?id=6321295551576939276)![❄️](tg://emoji?id=6323250174013479634)Kindly use the Bot/group below
+<tg-emoji emoji-id="6321295551576939276">🟢</tg-emoji><tg-emoji emoji-id="6323250174013479634">❄️</tg-emoji><b>Kindly use the Bot/group below</b>
 
-![😊](tg://emoji?id=6323514039624277371)Click on buttons![🗣️](tg://emoji?id=6321119462212770863)
+<tg-emoji emoji-id="6323514039624277371">😊</tg-emoji><b>Click on buttons</b><tg-emoji emoji-id="6321119462212770863">🗣️</tg-emoji>
 """
 
-ALERT_RAW = """
-![🔮](tg://emoji?id=5854688062566567731)Above Message Will Be Deleted In 4 Min![⏱](tg://emoji?id=5947290074319162163)
+ALERT_HTML = """
+<tg-emoji emoji-id="5854688062566567731">🔮</tg-emoji><b>Above Message Will Be Deleted In 4 Min</b><tg-emoji emoji-id="5947290074319162163">⏱</tg-emoji>
 """
 
-DELETE_RAW = """
-![♨️](tg://emoji?id=6321096110475583514)Send another message To Get Link Again ![🗣️](tg://emoji?id=6321119462212770863)
+DELETE_HTML = """
+<tg-emoji emoji-id="6321096110475583514">♨️</tg-emoji><b>Send another message To Get Link Again</b> <tg-emoji emoji-id="6321119462212770863">🗣️</tg-emoji>
 """
 
-BL_RAW = """
-![⚠️](tg://emoji?id=6320837317221162843)![❗️](tg://emoji?id=6323541003428964949)![❗️](tg://emoji?id=6320974773354503135)![❗️](tg://emoji?id=6323497568424696886)![❗️](tg://emoji?id=6323504637940866342)![❗️](tg://emoji?id=6320868013352426245)![❗️](tg://emoji?id=6320812887447182178)![❗️](tg://emoji?id=6323444675902447251)![❗️](tg://emoji?id=6323404960339860176)![❗️](tg://emoji?id=6321227244417064040)![🗣️](tg://emoji?id=6321119462212770863)
+BL_HTML = """
+<tg-emoji emoji-id="6320837317221162843">⚠️</tg-emoji><tg-emoji emoji-id="6323541003428964949">❗️</tg-emoji><tg-emoji emoji-id="6320974773354503135">❗️</tg-emoji><tg-emoji emoji-id="6323497568424696886">❗️</tg-emoji><tg-emoji emoji-id="6323504637940866342">❗️</tg-emoji><tg-emoji emoji-id="6320868013352426245">❗️</tg-emoji><tg-emoji emoji-id="6320812887447182178">❗️</tg-emoji><tg-emoji emoji-id="6323444675902447251">❗️</tg-emoji><tg-emoji emoji-id="6323404960339860176">❗️</tg-emoji><tg-emoji emoji-id="6321227244417064040">❗️</tg-emoji><tg-emoji emoji-id="6321119462212770863">🗣️</tg-emoji>
 """
 
-# --- 6. BACKGROUND LOGIC ---
+# --- 5. BACKGROUND LOGIC ---
 
-async def handle_sequence(client, chat_id, reqst_msg_id):
+async def handle_sequence(bot, chat_id, reqst_msg_id):
     await asyncio.sleep(180)
     try:
-        await client.delete_messages(chat_id, reqst_msg_id)
+        await bot.delete_message(chat_id, reqst_msg_id)
     except:
         pass
 
-    me = await client.get_me()
-    button = InlineKeyboardMarkup([[
-        InlineKeyboardButton("👀Start Now🌻", url=f"https://t.me/{me.username}?start=return")
-    ]])
+    bot_me = await bot.get_me()
+    button = types.InlineKeyboardMarkup()
+    button.add(types.InlineKeyboardButton("👀Start Now🌻", url=f"https://t.me/{bot_me.username}?start=return"))
     
     try:
-        # SEND DELETE TEXT
-        del_msg = await client.send_message(
+        del_msg = await bot.send_message(
             chat_id, 
-            make_bold(DELETE_RAW), 
-            reply_markup=button, 
-            parse_mode=enums.ParseMode.MARKDOWN
+            DELETE_HTML, 
+            reply_markup=button
         )
-        # Always pin DELETE_RAW
         try:
-            await del_msg.pin(disable_notification=False, both_sides=True)
+            await bot.pin_chat_message(chat_id, del_msg.message_id, disable_notification=False)
         except Exception as e:
-            print(f"⚠️ Failed to pin DELETE_TEXT: {e}")
+            logger.error(f"Pin Error: {e}")
             
     except Exception as e:
         logger.error(f"Error sending Delete Text: {e}")
 
     try:
-        # SEND BL TEXT
-        bl_msg = await client.send_message(chat_id, make_bold(BL_RAW), parse_mode=enums.ParseMode.MARKDOWN)
+        bl_msg = await bot.send_message(chat_id, BL_HTML)
         if PIN_BL:
-            try: await bl_msg.pin(disable_notification=False, both_sides=True)
-            except Exception as e: print(f"⚠️ Failed to pin BL_RAW: {e}")
+            try: await bot.pin_chat_message(chat_id, bl_msg.message_id, disable_notification=False)
+            except: pass
     except:
         pass
 
-# --- 7. HANDLERS ---
+# --- 6. HANDLERS ---
 
-def register_handlers(app: Client):
+def register_handlers(bot: AsyncTeleBot):
     
     # --- START HANDLER ---
-    @app.on_message(filters.command("start") & filters.private)
-    async def start_handler(client: Client, message: Message):
+    @bot.message_handler(commands=['start'])
+    async def start_command(message):
         user_id = message.from_user.id
         
         if db and await db.is_banned(user_id): return 
 
+        args = message.text.split()
         source = "organic"
-        if len(message.command) > 1:
-            source = message.command[1]
+        if len(args) > 1:
+            source = args[1]
 
-        fname = message.from_user.first_name
-        lname = message.from_user.last_name if message.from_user.last_name else ""
-        full_name = f"{fname} {lname}".strip()
-        custom_mention = f"[{full_name}](tg://user?id={user_id})"
+        custom_mention = f'<a href="tg://user?id={user_id}">{message.from_user.first_name}</a>'
 
         is_new = False
         if db:
@@ -265,193 +230,187 @@ def register_handlers(app: Client):
         if is_new and source != "return":
             log_text = (
                 f"#New_User\n"
-                f"User: {message.from_user.mention}\n"
-                f"ID: `{user_id}`\n"
+                f"User: {custom_mention}\n"
+                f"ID: <code>{user_id}</code>\n"
                 f"Source: {source}"
             )
             try:
-                await client.send_message(LOG_CHANNEL, log_text)
+                await bot.send_message(LOG_CHANNEL, log_text)
             except:
                 pass
 
         try:
-            # SEND START RAW
-            start_msg = await message.reply_text(make_bold(START_RAW, name=custom_mention), parse_mode=enums.ParseMode.MARKDOWN)
+            start_msg = await bot.reply_to(
+                message, 
+                START_HTML.format(name=custom_mention, img=PREVIEW_IMAGE)
+            )
             if PIN_START:
-                try: await start_msg.pin(disable_notification=False, both_sides=True)
-                except Exception as e: print(f"⚠️ Failed to pin START_RAW: {e}")
+                try: await bot.pin_chat_message(message.chat.id, start_msg.message_id, disable_notification=False)
+                except: pass
 
-            # SEND ADS RAW
-            ads_msg = await message.reply_text(make_bold(ADS_RAW), parse_mode=enums.ParseMode.MARKDOWN)
+            ads_msg = await bot.reply_to(message, ADS_HTML)
             if PIN_ADS or ADS_RAW_PIN:
-                try: await ads_msg.pin(disable_notification=False, both_sides=True)
-                except Exception as e: print(f"⚠️ Failed to pin ADS_RAW: {e}")
+                try: await bot.pin_chat_message(message.chat.id, ads_msg.message_id, disable_notification=False)
+                except: pass
 
         except Exception as e:
             logger.error(f"Start Error: {e}")
 
-    # --- ADMIN: STATS ---
-    @app.on_message(filters.command("stats") & filters.user(ADMIN_IDS))
-    async def stats_handler(client: Client, message: Message):
+    # --- ADMIN STATS ---
+    @bot.message_handler(commands=['stats'])
+    async def stats_command(message):
+        if message.from_user.id not in ADMIN_IDS: return
         if not db: return
         total, active, blocked, today = await db.get_full_stats()
         sources = await db.get_source_stats()
         
+        sources_text = ""
+        for src, count in sources.items(): 
+            sources_text += f"• {src}: {count}\n"
+
         text = (
-            f"📊 **BOT STATISTICS**\n\n"
-            f"👥 **Total Users:** {total}\n"
-            f"✅ **Active:** {active}\n"
-            f"🚫 **Blocked:** {blocked}\n"
-            f"📅 **Joined Today:** {today}\n\n"
-            f"🔗 **Top Sources:**\n"
+            f"<tg-emoji emoji-id='6321052714126025714'>📊</tg-emoji> <b>BOT STATISTICS</b>\n\n"
+            f"<tg-emoji emoji-id='6321128013492657577'>👥</tg-emoji> <b>Total Users:</b> {total}\n"
+            f"<tg-emoji emoji-id='6320924492172369146'>✅</tg-emoji> <b>Active:</b> {active}\n"
+            f"<tg-emoji emoji-id='5413879192267805083'>🗓</tg-emoji> <b>Joined Today:</b> {today}\n\n"
+            f"<tg-emoji emoji-id='5260730055880876557'>⛓</tg-emoji> <b>Top Sources:</b>\n"
+            f"{sources_text}"
         )
-        for src, count in sources.items():
-            text += f"• {src}: {count}\n"
-        await message.reply_text(text)
+        await bot.reply_to(message, text)
 
-    # --- ADMIN: BROADCAST ---
-    @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS) & filters.reply)
-    async def broadcast_request(client: Client, message: Message):
-        buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Yes, Pin it 📌", callback_data="bc_pin_yes")],
-            [InlineKeyboardButton("No, Just Send 📨", callback_data="bc_pin_no")]
-        ])
-        await message.reply_text("Do you want to Pin this message?", reply_to_message_id=message.reply_to_message.id, reply_markup=buttons)
+    # --- BROADCAST ---
+    @bot.message_handler(commands=['broadcast'])
+    async def broadcast_command(message):
+        if message.from_user.id not in ADMIN_IDS: return
+        if not message.reply_to_message:
+            await bot.reply_to(message, "Reply to a message to broadcast.")
+            return
 
-    @app.on_callback_query(filters.regex("bc_pin_"))
-    async def broadcast_execute(client: Client, callback: CallbackQuery):
-        should_pin = "yes" in callback.data
-        original_msg = callback.message.reply_to_message
-        await callback.message.edit_text("🚀 Broadcast started... This will take time.")
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("Yes, Pin it 📌", callback_data="bc_pin_yes"),
+            types.InlineKeyboardButton("No, Just Send 📨", callback_data="bc_pin_no")
+        )
+        await bot.reply_to(message, "Pin message?", reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("bc_pin_"))
+    async def broadcast_callback(call):
+        should_pin = "yes" in call.data
+        original_msg = call.message.reply_to_message
+        await bot.edit_message_text("🚀 Broadcast started...", call.message.chat.id, call.message.message_id)
         
         users_cursor = db.users.find({}, {"_id": 1})
-        sent = 0
-        blocked = 0
-        failed = 0
+        sent, blocked, failed = 0, 0, 0
         
         async for user in users_cursor:
             user_id = user['_id']
             try:
-                msg = await original_msg.copy(chat_id=user_id)
+                msg = await bot.copy_message(chat_id=user_id, from_chat_id=original_msg.chat.id, message_id=original_msg.message_id)
                 if should_pin:
-                    try: await msg.pin(disable_notification=False, both_sides=True)
+                    try: await bot.pin_chat_message(user_id, msg.message_id)
                     except: pass
                 sent += 1
                 await asyncio.sleep(0.05)
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                try: await original_msg.copy(chat_id=user_id)
-                except: failed += 1
-            except (InputUserDeactivated, UserIsBlocked, PeerIdInvalid):
-                await db.update_block_status(user_id, "blocked")
-                blocked += 1
-            except Exception:
-                failed += 1
+            except Exception as e:
+                if "blocked" in str(e).lower() or "user is deactivated" in str(e).lower():
+                    await db.update_block_status(user_id, "blocked")
+                    blocked += 1
+                else:
+                    failed += 1
         
-        await callback.message.reply_text(
-            f"✅ **Broadcast Completed**\n\n"
-            f"📨 Sent: {sent}\n"
-            f"🚫 Blocked: {blocked}\n"
-            f"❌ Failed: {failed}"
-        )
+        await bot.send_message(call.message.chat.id, f"✅ <b>Broadcast Completed</b>\nSent: {sent}\nBlocked: {blocked}\nFailed: {failed}")
 
-    # --- ADMIN: GLOBAL BAN ---
-    @app.on_message(filters.command("ban") & filters.user(ADMIN_IDS))
-    async def global_ban(client: Client, message: Message):
+    # --- BAN ---
+    @bot.message_handler(commands=['ban'])
+    async def ban_command(message):
+        if message.from_user.id not in ADMIN_IDS: return
         try:
-            target_id = int(message.command[1])
+            target_id = int(message.text.split()[1])
             await db.ban_user(target_id, "Spam")
-            await message.reply_text(f"🚫 User `{target_id}` banned.")
+            await bot.reply_to(message, f"🚫 User <code>{target_id}</code> banned.")
         except:
-            await message.reply_text("Usage: /ban user_id")
+            await bot.reply_to(message, "Usage: /ban user_id")
 
     # --- MAIN REPLY FLOW ---
-    @app.on_message(filters.private & ~filters.command(["start", "broadcast", "stats", "ban", "unban"]))
-    async def reply_flow(client: Client, message: Message):
+    @bot.message_handler(func=lambda m: True)
+    async def echo_all(message):
+        if message.chat.type != 'private': return
         if db and await db.is_banned(message.from_user.id): return
 
         try:
-            req_buttons = InlineKeyboardMarkup([
-                [InlineKeyboardButton(" Use this Bot 🟢", url="https://t.me/botsexpertbot")],
-                [InlineKeyboardButton(" Join and search in group 🟢", url="https://t.me/groupusername")]
-            ])
-
-            req_msg = await message.reply_text(
-                make_bold(REQST_RAW), 
-                reply_markup=req_buttons,
-                parse_mode=enums.ParseMode.MARKDOWN
+            req_markup = types.InlineKeyboardMarkup()
+            req_markup.add(
+                types.InlineKeyboardButton(" Use this Bot 🟢", url="https://t.me/botsexpertbot"),
+                types.InlineKeyboardButton(" Join and search in group 🟢", url="https://t.me/groupusername")
             )
 
-            alert_msg = await message.reply_text(
-                make_bold(ALERT_RAW),
-                parse_mode=enums.ParseMode.MARKDOWN
+            req_msg = await bot.reply_to(
+                message,
+                REQST_HTML, 
+                reply_markup=req_markup
             )
-            # PIN ALERT IF ENABLED
+
+            alert_msg = await bot.reply_to(
+                message,
+                ALERT_HTML
+            )
+            
             if PIN_ALERT:
-                try: await alert_msg.pin(disable_notification=False, both_sides=True)
-                except Exception as e: print(f"⚠️ Failed to pin ALERT_RAW: {e}")
+                try: await bot.pin_chat_message(message.chat.id, alert_msg.message_id, disable_notification=False)
+                except: pass
 
-            asyncio.create_task(handle_sequence(client, message.chat.id, req_msg.id))
+            asyncio.create_task(handle_sequence(bot, message.chat.id, req_msg.message_id))
 
         except Exception as e:
             logger.error(f"Reply Flow Error: {e}")
 
-for app in apps:
-    register_handlers(app)
+for bot in bots:
+    register_handlers(bot)
 
-# --- 8. DAILY REPORT SCHEDULER (5:30 AM IST) ---
+# --- 7. SCHEDULED TASKS ---
 
 async def send_daily_report():
-    if not apps or not db: return
+    if not bots: return
     try:
         total, active, blocked, today = await db.get_full_stats()
         sources = await db.get_source_stats()
-        
-        report = (
-            f"🌅 **DAILY REPORT (05:30 IST)**\n\n"
-            f"📅 **Users Joined Last 24h:** {today}\n"
-            f"👥 **Total Active Users:** {active}\n"
-            f"🚫 **Blocked Users:** {blocked}\n\n"
-            f"🔗 **Top Sources:**\n"
-        )
-        for src, count in sources.items():
-            report += f"• {src}: {count}\n"
-        await apps[0].send_message(LOG_CHANNEL, report)
+        report = f"🌅 <b>DAILY REPORT (05:30 IST)</b>\n\n📅 <b>Users Joined Today:</b> {today}\n👥 <b>Total Active:</b> {active}\n🚫 <b>Blocked:</b> {blocked}\n\n🔗 <b>Top Sources:</b>\n"
+        for src, count in sources.items(): report += f"• {src}: {count}\n"
+        await bots[0].send_message(LOG_CHANNEL, report)
     except Exception as e:
         logger.error(f"Daily Report Failed: {e}")
 
 scheduler = AsyncIOScheduler()
 scheduler.add_job(send_daily_report, 'cron', hour=5, minute=30, timezone=IST)
 
-# --- 9. DUMMY WEB SERVER FOR KOYEB FREE TIER ---
-
-async def web_handler(request):
-    return web.Response(text="Bot is Running")
-
-async def start_web_server():
-    port = int(os.environ.get("PORT", 8000))
-    app = web.Application()
-    app.add_routes([web.get('/', web_handler)])
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"🌍 Web Server running on port {port}")
-
-# --- 10. RUN ---
+# --- 8. RUN ---
 
 async def main():
-    print(f"🚀 Starting {len(apps)} Bots...")
+    print(f"🚀 Starting {len(bots)} Bots (Telebot)...")
     
-    # Start Web Server First (Important for Health Checks)
-    await start_web_server()
-    
+    # --- SEND STARTUP LOG ---
+    active_bot_usernames = []
+    for bot in bots:
+        try:
+            me = await bot.get_me()
+            active_bot_usernames.append(f"@{me.username}")
+        except Exception as e:
+            logger.error(f"Startup check failed for a bot: {e}")
+
+    if active_bot_usernames and LOG_CHANNEL:
+        log_text = (
+            f"🚀 <b>Bot Restarted!</b>\n\n"
+            f"✅ <b>Active Bots ({len(active_bot_usernames)}):</b>\n"
+            + "\n".join(active_bot_usernames)
+        )
+        try:
+            await bots[0].send_message(LOG_CHANNEL, log_text)
+        except Exception as e:
+            logger.error(f"Failed to send startup log: {e}")
+
+    # --- START POLLING ---
     scheduler.start()
-    await asyncio.gather(*[app.start() for app in apps])
-    print("✅ Bots are Online!")
-    await idle()
-    await asyncio.gather(*[app.stop() for app in apps])
+    await asyncio.gather(*(bot.polling(non_stop=True) for bot in bots))
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.run(main())
