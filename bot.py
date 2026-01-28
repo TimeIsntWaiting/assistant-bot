@@ -9,6 +9,7 @@ from telebot import types
 from motor.motor_asyncio import AsyncIOMotorClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
+from aiohttp import web  # REQUIRED FOR KOYEB
 
 # --- 1. CONFIGURATION ---
 
@@ -383,32 +384,47 @@ async def send_daily_report():
 scheduler = AsyncIOScheduler()
 scheduler.add_job(send_daily_report, 'cron', hour=5, minute=30, timezone=IST)
 
-# --- 8. RUN ---
+# --- 8. KOYEB HEALTH CHECK SERVER ---
+
+async def health_check(request):
+    return web.Response(text="Bot Running")
+
+async def start_web_server():
+    # Koyeb sets the PORT environment variable.
+    port = int(os.environ.get("PORT", 8080))
+    app = web.Application()
+    app.add_routes([web.get('/', health_check)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌍 Web Server running on port {port}")
+
+# --- 9. RUN ---
 
 async def main():
     print(f"🚀 Starting {len(bots)} Bots (Telebot)...")
     
-    # --- SEND STARTUP LOG ---
+    # 1. Start Web Server (CRITICAL for Koyeb)
+    await start_web_server()
+
+    # 2. Send Startup Log
     active_bot_usernames = []
     for bot in bots:
         try:
             me = await bot.get_me()
             active_bot_usernames.append(f"@{me.username}")
-        except Exception as e:
-            logger.error(f"Startup check failed for a bot: {e}")
-
+        except Exception:
+            pass
+    
     if active_bot_usernames and LOG_CHANNEL:
-        log_text = (
-            f"🚀 <b>Bot Restarted!</b>\n\n"
-            f"✅ <b>Active Bots ({len(active_bot_usernames)}):</b>\n"
-            + "\n".join(active_bot_usernames)
-        )
         try:
+            log_text = f"🚀 <b>Bot Restarted!</b>\n\n✅ <b>Active Bots ({len(active_bot_usernames)}):</b>\n" + "\n".join(active_bot_usernames)
             await bots[0].send_message(LOG_CHANNEL, log_text)
         except Exception as e:
-            logger.error(f"Failed to send startup log: {e}")
+            logger.error(f"Startup Log Error: {e}")
 
-    # --- START POLLING ---
+    # 3. Start Polling
     scheduler.start()
     await asyncio.gather(*(bot.polling(non_stop=True) for bot in bots))
 
