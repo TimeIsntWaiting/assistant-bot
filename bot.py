@@ -341,7 +341,8 @@ def register_handlers(bot: AsyncTeleBot):
         try:
             req_markup = types.InlineKeyboardMarkup()
             req_markup.add(
-                types.InlineKeyboardButton(" Use this Bot 🟢", url="https://t.me/ThemovieQ1bot"),
+                types.InlineKeyboardButton(" Use this Bot 🟢", url="https://t.me/IpopkornN_Bot"),
+                types.InlineKeyboardButton(" Server 2 Bot 🟢", url="https://t.me/Ipopkorn_1Bot"),
                 types.InlineKeyboardButton(" Join and search in group 🟢", url="https://t.me/iPopkornMovies_Group")
             )
 
