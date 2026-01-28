@@ -160,7 +160,7 @@ REQST_HTML = """
 """
 
 ALERT_HTML = """
-<tg-emoji emoji-id="5854688062566567731">🔮</tg-emoji><b>Above Message Will Be Deleted In 4 Min</b><tg-emoji emoji-id="5947290074319162163">⏱</tg-emoji>
+<tg-emoji emoji-id="5854688062566567731">🔮</tg-emoji><b>Above Message Will Be Deleted In 2 Min</b><tg-emoji emoji-id="5947290074319162163">⏱</tg-emoji>
 """
 
 DELETE_HTML = """
@@ -174,7 +174,7 @@ BL_HTML = """
 # --- 5. BACKGROUND LOGIC ---
 
 async def handle_sequence(bot, chat_id, reqst_msg_id):
-    await asyncio.sleep(180)
+    await asyncio.sleep(120)
     try:
         await bot.delete_message(chat_id, reqst_msg_id)
     except:
